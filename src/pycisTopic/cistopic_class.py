@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections as cl
 import logging
 import sys
+import concurrent.futures
 from typing import TYPE_CHECKING, Self
 
 import numpy as np
@@ -745,6 +746,7 @@ def create_cistopic_object_from_fragments(
     valid_bc: list[str] | None = None,
     n_cpu: int = 1,
     min_frag: int = 1,
+    tag_cells: bool = True,
     min_cell: int = 1,
     is_acc: int = 1,
     check_for_duplicates: bool = True,
@@ -815,20 +817,23 @@ def create_cistopic_object_from_fragments(
     else:
         fragments = read_fragments_from_file(path_to_fragments, use_polars=use_polars)
 
+    log.info('Generating fragment matrix')
     if "Score" not in fragments.df:
         fragments_df = fragments.df
         if check_for_duplicates:
             log.info("Collapsing duplicates")
-            fragments_df = pd.concat(
-                [
-                    collapse_duplicates(fragments_df[fragments_df.Chromosome == x])
-                    for x in fragments_df.Chromosome.cat.categories.values
-                ]
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_cpu) as executor:
+                collapsed_fragments = list(executor.map(
+                    process_chromosome,
+                    fragments_df.Chromosome.cat.categories.values,
+                    [fragments_df] * len(fragments_df.Chromosome.cat.categories.values)
+                ))
+            fragments_df = pd.concat(collapsed_fragments)
         else:
             fragments_df["Score"] = 1
         fragments = pr.PyRanges(fragments_df)
 
+    log.info("Reading bed file")
     regions = pr.read_bed(path_to_regions)
     regions = regions[["Chromosome", "Start", "End"]]
     regions.regionID = (
@@ -884,12 +889,40 @@ def create_cistopic_object_from_fragments(
             .astype(np.int32)
         )
         fragment_matrix.columns.names = [None]
+        
+        # counts_df.Name has many unused cellname categories because the categorical is made using all fragments
+        # this doesn't matter for making a sparse matrix but these get dropped with `.groupby(observed=True)
+        # below I remove them for comparison but this step is unnecessary and one 
+        # could just keep the columns and cell names where s_csr.getnnz(axis=0) > 0
+        new_cat = counts_df.Name.cat.remove_unused_categories()
+        name_order = new_cat.cat.categories
+        cat_order = counts_df.regionID.cat.categories
+        # just for comparison with below
+        fragment_ordered = fragment_matrix.loc[cat_order][name_order]
+
+        # converted to csr matrix in `create_cistopic_object` but do so manually here to compare
+        fragment_sparse = sparse.csr_matrix(fragment_ordered.to_numpy(), dtype=np.int32)
+        assert fragment_sparse.data.sum() == len(counts_df)
+        assert (counts_df.regionID.cat.categories == fragment_ordered.index).all()
+
+        # avoid creating dense dataframe using categorical indices
+        data = np.ones(len(counts_df))
+        # coo matrix adds duplicates similar so it counts the number of fragments like `.groupby().size()`
+        # could also accumulate the scores
+        s_coo = sparse.coo_matrix((data, (counts_df.regionID.cat.codes.values, new_cat.cat.codes.values)))
+        s_csr = s_coo.tocsr()
+        # compare and see we have created the same matrix
+        assert np.array_equal(s_csr.data, fragment_sparse.data)
+        assert (s_csr.indices == fragment_sparse.indices).all()
+        assert (s_csr.indptr  == fragment_sparse.indptr).all()
+
         # Create CistopicObject
         cistopic_obj = create_cistopic_object(
             fragment_matrix=fragment_matrix,
             path_to_blacklist=path_to_blacklist,
             min_frag=min_frag,
             min_cell=min_cell,
+            tag_cells=tag_cells,
             is_acc=is_acc,
             path_to_fragments={project: path_to_fragments},
             project=project,
@@ -999,3 +1032,6 @@ def merge(
         split_pattern=split_pattern,
     )
     return merged_cistopic_obj
+
+def process_chromosome(chromosome, fragments_df):
+    return collapse_duplicates(fragments_df[fragments_df.Chromosome == chromosome])
