@@ -261,7 +261,7 @@ def read_tss_annotation_from_bed(tss_annotation_bed_filename: str) -> pl.DataFra
         separator="\t",
         # Use 0-bytes as comment character so the header can start with "# Chromosome".
         comment_prefix="\0",
-        schema_overrides={
+        dtype={
             # Convert Chromosome, Start and End column to the correct datatypes.
             "Chromosome": pl.Categorical,
             "# Chromosome": pl.Categorical,
@@ -726,7 +726,7 @@ def find_most_likely_chromosome_source_in_bed(
     chrom_source_stats_df_pl = chrom_sizes_and_alias_df_pl.select(
         [
             pl.col(column_name).is_in(chroms_from_bed).sum()
-            for column_name in chrom_sizes_and_alias_df_pl.collect_schema().names()
+            for column_name in chrom_sizes_and_alias_df_pl.schema.keys()
         ]
     )
 
