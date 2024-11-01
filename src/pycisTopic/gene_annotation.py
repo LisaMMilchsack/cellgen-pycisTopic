@@ -261,7 +261,7 @@ def read_tss_annotation_from_bed(tss_annotation_bed_filename: str) -> pl.DataFra
         separator="\t",
         # Use 0-bytes as comment character so the header can start with "# Chromosome".
         comment_prefix="\0",
-        dtype={
+        schema_overrides={
             # Convert Chromosome, Start and End column to the correct datatypes.
             "Chromosome": pl.Categorical,
             "# Chromosome": pl.Categorical,
